@@ -45,7 +45,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.7" },
-    { name = "langchain-aws", specifier = ">=0.2.10" },
+    { name = "langchain-aws", git = "https://github.com/cipher982/langchain-aws.git?subdirectory=libs%2Faws&rev=feature%2Fconverse-optimized-endpoints" },
     { name = "matplotlib", specifier = ">=3.10.0" },
     { name = "pandas", specifier = ">=2.2.3" },
     { name = "python-dotenv", specifier = ">=1.0.1" },
@@ -344,16 +344,12 @@ wheels = [
 [[package]]
 name = "langchain-aws"
 version = "0.2.10"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/cipher982/langchain-aws.git?subdirectory=libs%2Faws&rev=feature%2Fconverse-optimized-endpoints#0378749b12c7bc6d0053c3d7b0d2ac6949d45524" }
 dependencies = [
     { name = "boto3" },
     { name = "langchain-core" },
     { name = "numpy" },
     { name = "pydantic" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/09/70/10c61625871f410dc31c4a6c3e963e4a1ba557938bf33bd9f4088c8d7d36/langchain_aws-0.2.10.tar.gz", hash = "sha256:af733cb328e795a3b7189221b4aab694743176c00487749ff885d6297f9860a4", size = 74474 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/10/27/5960205e8c150d2a4a791d23d4ff450003d5f8036a05573635294929f932/langchain_aws-0.2.10-py3-none-any.whl", hash = "sha256:37e4a8d5d1a7d2f493c62ba181e5eb0eb36f4b235dc239b070507dec5b042eed", size = 88340 },
 ]
 
 [[package]]

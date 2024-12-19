@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 
 dependencies = [
     "click>=8.1.7",
-    "langchain-aws>=0.2.10",
+    "langchain-aws @ git+https://github.com/cipher982/langchain-aws.git@feature/converse-optimized-endpoints#subdirectory=libs/aws",
     "matplotlib>=3.10.0",
     "pandas>=2.2.3",
     "python-dotenv>=1.0.1",
@@ -45,4 +45,3 @@ python_files = ["test_*.py"]
 [tool.mypy]
 ignore_missing_imports = true
 check_untyped_defs = true
-
