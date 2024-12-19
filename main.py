@@ -97,13 +97,14 @@ def run_benchmarks(
     logger.info(f"Running {total_tasks} total tasks with {concurrent_calls} concurrent calls")
 
     # Run all tasks in parallel batches
-    all_results = Parallel(n_jobs=concurrent_calls, verbose=10)(
+    all_results = Parallel(n_jobs=concurrent_calls)(
         delayed(run_query)(method, query, model_id, config) for method, config, query, iteration in all_tasks
     )
 
-    # Add iteration information to results
+    # Add iteration information and model_id to results
     for (method, config, query, iteration), result in zip(all_tasks, all_results):
         result["iteration"] = iteration
+        result["model_id"] = model_id
         results.append(result)
 
     # Convert results to DataFrame
@@ -133,16 +134,11 @@ def run_benchmarks(
 
 
 def plot_results(df: pd.DataFrame):
+    """Create comprehensive performance visualization plots."""
     # Ensure output directory exists
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    plt.figure(figsize=(12, 6))
-    x = np.arange(len(df["query"].unique()))
-    bar_width = 0.2
-    methods = df["method"].unique()
-    perf_configs = df["performance_config"].unique()
-
-    # Color palette for different method-config combinations
+    # Color palette
     aws_orange = "#FF9900"
     aws_dark_orange = "#FF6600"
     langchain_colors = ["#4CAF50", "#2E7D32"]
@@ -150,36 +146,59 @@ def plot_results(df: pd.DataFrame):
     perf_configs = ["standard", "optimized"]
     colors = [langchain_colors[0], langchain_colors[1], aws_orange, aws_dark_orange]
 
+    # Create figure with subplots
+    fig = plt.figure(figsize=(15, 10))
+    gs = fig.add_gridspec(2, 2, hspace=0.3, wspace=0.3)
+
+    # Plot 1: Bar plot with error bars
+    ax1 = fig.add_subplot(gs[0, :])
+
+    # Calculate average tokens per second for each query to determine order
+    avg_tokens_per_sec = df.groupby("query")["tokens_per_second"].mean().sort_values(ascending=True)
+    queries = avg_tokens_per_sec.index.tolist()  # Queries sorted by performance
+    x = np.arange(len(queries))
+    bar_width = 0.2
+
     for i, method in enumerate(methods):
         for j, config in enumerate(perf_configs):
-            data = (
+            stats = (
                 df[(df["method"] == method) & (df["performance_config"] == config)]
-                .groupby("query")["tokens_per_second"]
-                .mean()
+                .groupby("query")
+                .agg({"tokens_per_second": ["mean", "std"]})
             )
-            plt.bar(
+            # Ensure stats are ordered by average performance
+            stats = stats.reindex(queries)
+
+            ax1.bar(
                 x + (i * len(perf_configs) + j) * bar_width,
-                data.values,
+                stats["tokens_per_second"]["mean"],
                 bar_width,
+                yerr=stats["tokens_per_second"]["std"],
                 label=f"{method} - {config}",
-                alpha=0.8,
                 color=colors[i * len(perf_configs) + j],
+                alpha=0.8,
+                capsize=5,
             )
 
-    plt.xlabel("Queries", fontsize=12)
-    plt.ylabel("Tokens per Second", fontsize=12)
-    plt.title(
-        "Claude 3.5 Haiku Performance Comparison\nLangchain vs Boto3 - Standard vs Optimized Configuration",
-        fontsize=14,
-        pad=20,
-    )
-    plt.xticks(x, df["query"].unique(), rotation=0, ha="center", fontsize=9)
-    plt.tight_layout()
-    plt.legend(title="Method - Configuration", loc="upper left", bbox_transform=plt.gcf().transFigure)
+    ax1.set_xlabel("Queries")
+    ax1.set_ylabel("Tokens per Second")
+    ax1.set_title("Performance Comparison by Query")
+    ax1.set_xticks(x + bar_width * 1.5)
+    ax1.set_xticklabels(queries, rotation=0, ha="center", fontsize=9)
+    ax1.legend(title="Method - Configuration")
 
-    # Save to output directory
-    plt.savefig(os.path.join(OUTPUT_DIR, "benchmark_comparison_methods.png"), dpi=300, bbox_inches="tight")
-    plt.show()
+    # Add timestamp
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    fig.text(0.02, 0.02, f"Generated: {timestamp}", fontsize=8)
+
+    # Adjust layout and save
+    plt.tight_layout()
+    output_path = os.path.join(OUTPUT_DIR, "benchmark_results.png")
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.show()  # DO NOT REMOVE THIS
+    plt.close()
+
+    logger.info(f"Plots saved to {output_path}")
 
 
 @click.command()

@@ -163,3 +163,4 @@ cython_debug/
 
 *benchmark_results*.txt
 outputs/
+.DS_Store
