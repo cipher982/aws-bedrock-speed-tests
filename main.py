@@ -1,6 +1,5 @@
 import logging
 import os
-import threading
 import time
 from datetime import datetime
 from typing import Any
@@ -26,61 +25,51 @@ load_dotenv(override=True)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Thread-local storage for clients
-thread_local = threading.local()
 
+def run_query(method: str, query: str, model_id: str, performance_config: str) -> Dict[str, Any]:
+    """Run a single query and return performance metrics."""
+    start_time = time.time()
 
-def get_boto3_client():
-    if not hasattr(thread_local, "boto3_client"):
-        thread_local.boto3_client = boto3.client("bedrock-runtime", region_name=os.getenv("AWS_REGION"))
-    return thread_local.boto3_client
+    try:
+        if method == "boto3":
+            client = boto3.client("bedrock-runtime", region_name=os.getenv("AWS_REGION"))
+            response = client.converse(
+                modelId=model_id,
+                messages=[{"role": "user", "content": [{"text": query}]}],
+                performanceConfig={"latency": performance_config},
+            )
+            token_count = response["usage"]["outputTokens"]
 
-
-def get_langchain_client(model_id: str, performance_config: str):
-    cache_key = f"langchain_client_{performance_config}"
-    if not hasattr(thread_local, cache_key):
-        setattr(
-            thread_local,
-            cache_key,
-            ChatBedrockConverse(
+        elif method == "langchain":
+            client = ChatBedrockConverse(
                 model_id=model_id,
                 region_name=os.getenv("AWS_REGION"),
                 performance_config={"latency": performance_config},
-            ),
-        )
-    return getattr(thread_local, cache_key)
+            )
+            response = client.invoke(query)
+            token_count = response.usage_metadata["output_tokens"]
 
+        else:
+            raise ValueError(f"Unknown method: {method}")
 
-def run_query(method: str, query: str, model_id: str, performance_config: str) -> Dict[str, Any]:
-    start = time.perf_counter()
+        end_time = time.time()
+        processing_time = end_time - start_time
+        tokens_per_second = token_count / processing_time if processing_time > 0 else 0
 
-    if method == "Boto3":
-        client = get_boto3_client()
-        message = {"role": "user", "content": [{"text": query}]}
-        response = client.converse(
-            modelId=model_id,
-            messages=[message],
-            performanceConfig={"latency": performance_config},
-        )
-        token_count = response["usage"]["outputTokens"]
+        return {
+            "method": method,
+            "query": query,
+            "performance_config": performance_config,
+            "tokens_per_second": tokens_per_second,
+            "token_count": token_count,
+            "processing_time": processing_time,
+            "timestamp": datetime.now().isoformat(),
+            "success": True,
+            "error": None,
+        }
 
-    else:  # Langchain
-        client = get_langchain_client(model_id, performance_config)
-        response = client.invoke(query)
-        token_count = response.usage_metadata["output_tokens"]  # type: ignore
-
-    elapsed = time.perf_counter() - start
-    tps = token_count / elapsed if elapsed > 0 else float("inf")
-
-    return {
-        "Query": query,
-        "Method": method,
-        "PerfConfig": performance_config,
-        "ResponseTokens": token_count,
-        "Time (s)": f"{elapsed:.4f}",
-        "Tokens/s": tps,
-        "Timestamp": datetime.now().isoformat(),
-    }
+    except Exception as e:
+        raise Exception(f"Error running query: {e}")
 
 
 def run_benchmarks(
@@ -91,30 +80,56 @@ def run_benchmarks(
     configs: List[str],
     methods: List[str],
 ) -> pd.DataFrame:
-    # Build a single flat list of all tasks
-    tasks = [
-        (method, query, config)
-        for config in configs
+    """Run benchmarks for all combinations of methods and configurations."""
+    results = []
+
+    # Create all combinations of parameters for parallel execution
+    all_tasks = [
+        (method, config, query, iteration)
         for method in methods
+        for config in configs
         for query in queries
-        for _ in range(iterations)
+        for iteration in range(iterations)
     ]
 
-    # Calculate and log total number of tasks
-    total_tasks = len(tasks)
-    logger.info(f"Total tasks to run: {total_tasks}")
-    logger.info("Task breakdown:")
-    logger.info(f"  - Queries: {len(queries)}")
-    logger.info(f"  - Methods: {len(methods)}")
-    logger.info(f"  - Performance Configs: {len(configs)}")
-    logger.info(f"  - Iterations per combination: {iterations}")
+    # Calculate total number of tasks
+    total_tasks = len(all_tasks)
+    logger.info(f"Running {total_tasks} total tasks with {concurrent_calls} concurrent calls")
 
-    # Run tasks in parallel with joblib
-    results = Parallel(n_jobs=concurrent_calls, prefer="threads", verbose=1)(
-        delayed(run_query)(method, query, model_id, config) for method, query, config in tasks
+    # Run all tasks in parallel batches
+    all_results = Parallel(n_jobs=concurrent_calls, verbose=10)(
+        delayed(run_query)(method, query, model_id, config) for method, config, query, iteration in all_tasks
     )
 
-    return pd.DataFrame(results)
+    # Add iteration information to results
+    for (method, config, query, iteration), result in zip(all_tasks, all_results):
+        result["iteration"] = iteration
+        results.append(result)
+
+    # Convert results to DataFrame
+    df = pd.DataFrame(results)
+
+    # Add method_config column for easier plotting
+    df["method_config"] = df["method"] + " - " + df["performance_config"]
+
+    # Calculate additional statistics
+    stats_df = (
+        df.groupby(["method", "performance_config", "query"])
+        .agg(
+            {
+                "tokens_per_second": ["mean", "std", "min", "max"],
+                "processing_time": ["mean", "std"],
+                "token_count": ["mean", "sum"],
+                "success": "mean",
+            }
+        )
+        .round(2)
+    )
+
+    # Save detailed statistics
+    stats_df.to_csv(os.path.join(OUTPUT_DIR, f"detailed_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"))
+
+    return df
 
 
 def plot_results(df: pd.DataFrame):
@@ -122,22 +137,26 @@ def plot_results(df: pd.DataFrame):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     plt.figure(figsize=(12, 6))
-    x = np.arange(len(df["Query"].unique()))
+    x = np.arange(len(df["query"].unique()))
     bar_width = 0.2
-    methods = df["Method"].unique()
-    perf_configs = df["PerfConfig"].unique()
+    methods = df["method"].unique()
+    perf_configs = df["performance_config"].unique()
 
     # Color palette for different method-config combinations
     aws_orange = "#FF9900"
     aws_dark_orange = "#FF6600"
     langchain_colors = ["#4CAF50", "#2E7D32"]
-    methods = ["Langchain", "Boto3"]
+    methods = ["langchain", "boto3"]
     perf_configs = ["standard", "optimized"]
     colors = [langchain_colors[0], langchain_colors[1], aws_orange, aws_dark_orange]
 
     for i, method in enumerate(methods):
         for j, config in enumerate(perf_configs):
-            data = df[(df["Method"] == method) & (df["PerfConfig"] == config)].groupby("Query")["Tokens/s"].mean()
+            data = (
+                df[(df["method"] == method) & (df["performance_config"] == config)]
+                .groupby("query")["tokens_per_second"]
+                .mean()
+            )
             plt.bar(
                 x + (i * len(perf_configs) + j) * bar_width,
                 data.values,
@@ -154,7 +173,7 @@ def plot_results(df: pd.DataFrame):
         fontsize=14,
         pad=20,
     )
-    plt.xticks(x, df["Query"].unique(), rotation=0, ha="center", fontsize=9)
+    plt.xticks(x, df["query"].unique(), rotation=0, ha="center", fontsize=9)
     plt.tight_layout()
     plt.legend(title="Method - Configuration", loc="upper left", bbox_transform=plt.gcf().transFigure)
 
@@ -217,8 +236,8 @@ def main(
         queries = yaml.safe_load(f)["queries"]
 
     methods = [
-        "Langchain",
-        "Boto3",
+        "langchain",
+        "boto3",
     ]
     configs = [
         "standard",
@@ -227,7 +246,7 @@ def main(
 
     df = run_benchmarks(queries, model_id, iterations, concurrent_calls, configs, methods)
     # print(df)
-    # print(df[["Method", "PerfConfig", "Tokens/s"]])
+    # print(df[["method", "performance_config", "tokens_per_second"]])
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_file = f"unified_benchmark_results_{timestamp}.txt"
