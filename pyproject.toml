@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 
 dependencies = [
     "click>=8.1.7",
+    "joblib>=1.4.2",
     "langchain-aws @ git+https://github.com/cipher982/langchain-aws.git@feature/converse-optimized-endpoints#subdirectory=libs/aws",
     "matplotlib>=3.10.0",
     "pandas>=2.2.3",
