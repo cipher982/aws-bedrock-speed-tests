@@ -37,13 +37,18 @@ def get_boto3_client():
 
 
 def get_langchain_client(model_id: str, performance_config: str):
-    if not hasattr(thread_local, "langchain_client"):
-        thread_local.langchain_client = ChatBedrockConverse(
-            model_id=model_id,
-            region_name=os.getenv("AWS_REGION"),
-            performance_config={"latency": performance_config},
+    cache_key = f"langchain_client_{performance_config}"
+    if not hasattr(thread_local, cache_key):
+        setattr(
+            thread_local,
+            cache_key,
+            ChatBedrockConverse(
+                model_id=model_id,
+                region_name=os.getenv("AWS_REGION"),
+                performance_config={"latency": performance_config},
+            ),
         )
-    return thread_local.langchain_client
+    return getattr(thread_local, cache_key)
 
 
 def run_query(method: str, query: str, model_id: str, performance_config: str) -> Dict[str, Any]:
@@ -94,6 +99,15 @@ def run_benchmarks(
         for query in queries
         for _ in range(iterations)
     ]
+
+    # Calculate and log total number of tasks
+    total_tasks = len(tasks)
+    logger.info(f"Total tasks to run: {total_tasks}")
+    logger.info("Task breakdown:")
+    logger.info(f"  - Queries: {len(queries)}")
+    logger.info(f"  - Methods: {len(methods)}")
+    logger.info(f"  - Performance Configs: {len(configs)}")
+    logger.info(f"  - Iterations per combination: {iterations}")
 
     # Run tasks in parallel with joblib
     results = Parallel(n_jobs=concurrent_calls, prefer="threads", verbose=1)(
@@ -202,10 +216,19 @@ def main(
     with open(queries_file, "r") as f:
         queries = yaml.safe_load(f)["queries"]
 
-    methods = ["Langchain", "Boto3"]
-    configs = ["standard", "optimized"]
+    methods = [
+        "Langchain",
+        "Boto3",
+    ]
+    configs = [
+        "standard",
+        "optimized",
+    ]
 
     df = run_benchmarks(queries, model_id, iterations, concurrent_calls, configs, methods)
+    # print(df)
+    # print(df[["Method", "PerfConfig", "Tokens/s"]])
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_file = f"unified_benchmark_results_{timestamp}.txt"
     df.to_csv(os.path.join(OUTPUT_DIR, output_file), index=False)
