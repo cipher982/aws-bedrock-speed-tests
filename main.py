@@ -66,6 +66,7 @@ def run_query(method: str, query: str, model_id: str, performance_config: str) -
             "timestamp": datetime.now().isoformat(),
             "success": True,
             "error": None,
+            "model_id": model_id,
         }
 
     except Exception as e:
@@ -97,14 +98,13 @@ def run_benchmarks(
     logger.info(f"Running {total_tasks} total tasks with {concurrent_calls} concurrent calls")
 
     # Run all tasks in parallel batches
-    all_results = Parallel(n_jobs=concurrent_calls)(
+    all_results = Parallel(n_jobs=concurrent_calls, verbose=10)(
         delayed(run_query)(method, query, model_id, config) for method, config, query, iteration in all_tasks
     )
 
-    # Add iteration information and model_id to results
+    # Add iteration information to results
     for (method, config, query, iteration), result in zip(all_tasks, all_results):
         result["iteration"] = iteration
-        result["model_id"] = model_id
         results.append(result)
 
     # Convert results to DataFrame
@@ -134,7 +134,7 @@ def run_benchmarks(
 
 
 def plot_results(df: pd.DataFrame):
-    """Create comprehensive performance visualization plots."""
+    """Create comprehensive performance visualization plots with subplots for each model."""
     # Ensure output directory exists
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -142,50 +142,60 @@ def plot_results(df: pd.DataFrame):
     aws_orange = "#FF9900"
     aws_dark_orange = "#FF6600"
     langchain_colors = ["#4CAF50", "#2E7D32"]
-    methods = ["langchain", "boto3"]
+    methods = [
+        "langchain",
+        "boto3",
+    ]
     perf_configs = ["standard", "optimized"]
     colors = [langchain_colors[0], langchain_colors[1], aws_orange, aws_dark_orange]
 
-    # Create figure with subplots
-    fig = plt.figure(figsize=(15, 10))
-    gs = fig.add_gridspec(2, 2, hspace=0.3, wspace=0.3)
+    # Get unique models
+    models = df["model_id"].unique()
 
-    # Plot 1: Bar plot with error bars
-    ax1 = fig.add_subplot(gs[0, :])
+    # Create figure with subplots - one for each model
+    fig = plt.figure(figsize=(12, 3 * len(models)))
+    fig.suptitle("Benchmarking Optimized Endpoints for AWS Bedrock", fontsize=20)
+    gs = fig.add_gridspec(len(models), 1)
 
-    # Calculate average tokens per second for each query to determine order
-    avg_tokens_per_sec = df.groupby("query")["tokens_per_second"].mean().sort_values(ascending=True)
-    queries = avg_tokens_per_sec.index.tolist()  # Queries sorted by performance
-    x = np.arange(len(queries))
-    bar_width = 0.2
+    for model_idx, model in enumerate(models):
+        model_df = df[df["model_id"] == model]
 
-    for i, method in enumerate(methods):
-        for j, config in enumerate(perf_configs):
-            stats = (
-                df[(df["method"] == method) & (df["performance_config"] == config)]
-                .groupby("query")
-                .agg({"tokens_per_second": ["mean", "std"]})
-            )
-            # Ensure stats are ordered by average performance
-            stats = stats.reindex(queries)
+        # Calculate average tokens per second for each query to determine order
+        avg_tokens_per_sec = model_df.groupby("query")["tokens_per_second"].mean().sort_values(ascending=True)
+        queries = avg_tokens_per_sec.index.tolist()  # Queries sorted by performance
+        x = np.arange(len(queries))
+        bar_width = 0.2
 
-            ax1.bar(
-                x + (i * len(perf_configs) + j) * bar_width,
-                stats["tokens_per_second"]["mean"],
-                bar_width,
-                yerr=stats["tokens_per_second"]["std"],
-                label=f"{method} - {config}",
-                color=colors[i * len(perf_configs) + j],
-                alpha=0.8,
-                capsize=5,
-            )
+        # Create subplot for this model
+        ax = fig.add_subplot(gs[model_idx])
 
-    ax1.set_xlabel("Queries")
-    ax1.set_ylabel("Tokens per Second")
-    ax1.set_title("Performance Comparison by Query")
-    ax1.set_xticks(x + bar_width * 1.5)
-    ax1.set_xticklabels(queries, rotation=0, ha="center", fontsize=9)
-    ax1.legend(title="Method - Configuration")
+        for i, method in enumerate(methods):
+            for j, config in enumerate(perf_configs):
+                stats = (
+                    model_df[(model_df["method"] == method) & (model_df["performance_config"] == config)]
+                    .groupby("query")
+                    .agg({"tokens_per_second": ["mean", "std"]})
+                )
+                # Ensure stats are ordered by average performance
+                stats = stats.reindex(queries)
+
+                ax.bar(
+                    x + (i * len(perf_configs) + j) * bar_width,
+                    stats["tokens_per_second"]["mean"],
+                    bar_width,
+                    yerr=stats["tokens_per_second"]["std"],
+                    label=f"{method} - {config}",
+                    color=colors[i * len(perf_configs) + j],
+                    alpha=0.8,
+                    capsize=5,
+                )
+
+        ax.set_xlabel("Queries")
+        ax.set_ylabel("Tokens per Second")
+        ax.set_title(model)
+        ax.set_xticks(x + bar_width * 1.5)
+        ax.set_xticklabels(queries, rotation=0, ha="center", fontsize=9)
+        ax.legend(title="Method - Configuration")
 
     # Add timestamp
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -194,7 +204,7 @@ def plot_results(df: pd.DataFrame):
     # Adjust layout and save
     plt.tight_layout()
     output_path = os.path.join(OUTPUT_DIR, "benchmark_results.png")
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.savefig(output_path, dpi=450, bbox_inches="tight")
     plt.show()  # DO NOT REMOVE THIS
     plt.close()
 
@@ -204,14 +214,24 @@ def plot_results(df: pd.DataFrame):
 @click.command()
 @click.option("--iterations", "-i", default=5, help="Number of iterations for each query")
 @click.option("--concurrent-calls", "-c", default=4, help="Maximum number of concurrent workers")
-@click.option("--model-id", "-m", default="us.anthropic.claude-3-5-haiku-20241022-v1:0", help="Bedrock model ID")
+@click.option(
+    "--model-ids",
+    "-m",
+    default=[
+        "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+        "us.meta.llama3-1-70b-instruct-v1:0",
+        "us.meta.llama3-1-405b-instruct-v1:0",
+    ],
+    multiple=True,
+    help="Bedrock model IDs",
+)
 @click.option("--queries-file", "-q", default="queries.yaml", help="YAML file containing queries")
 @click.option("--plot-only", "-p", is_flag=True, help="Plot existing results without running benchmarks")
 @click.option("--results-file", "-r", default=None, help="Path to existing results file to plot")
 def main(
     iterations: int,
     concurrent_calls: int,
-    model_id: str,
+    model_ids: List[str],
     queries_file: str,
     plot_only: bool,
     results_file: Optional[str],
@@ -224,7 +244,7 @@ def main(
                 results_files = [
                     f
                     for f in os.listdir(OUTPUT_DIR)
-                    if f.startswith("unified_benchmark_results_") and f.endswith(".txt")
+                    if f.startswith("unified_benchmark_results_") and f.endswith(".csv")
                 ]
                 if not results_files:
                     logger.error(
@@ -263,17 +283,22 @@ def main(
         "optimized",
     ]
 
-    df = run_benchmarks(queries, model_id, iterations, concurrent_calls, configs, methods)
-    # print(df)
-    # print(df[["method", "performance_config", "tokens_per_second"]])
+    # Run benchmarks for each model and combine results
+    all_results = []
+    for model_id in model_ids:
+        logger.info(f"Running benchmarks for model: {model_id}")
+        df = run_benchmarks(queries, model_id, iterations, concurrent_calls, configs, methods)
+        all_results.append(df)
+
+    # Combine results from all models
+    combined_df = pd.concat(all_results, ignore_index=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = f"unified_benchmark_results_{timestamp}.txt"
-    df.to_csv(os.path.join(OUTPUT_DIR, output_file), index=False)
+    output_file = f"unified_benchmark_results_{timestamp}.csv"
+    combined_df.to_csv(os.path.join(OUTPUT_DIR, output_file), index=False)
     logger.info(f"Results saved to {os.path.join(OUTPUT_DIR, output_file)}")
 
-    # Plot immediately after benchmarks
-    plot_results(df)
+    plot_results(combined_df)
     logger.info("Benchmark and plotting completed.")
 
 
